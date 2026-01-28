@@ -2,10 +2,7 @@ import sqlite3
 import logging
 from datetime import datetime, date as date_type
 from calendar import monthcalendar, month_name
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.contrib.fsm_storage.memory import MemoryStorage
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters.state import State, StatesGroup
+from telebot import TeleBot, types
 
 # ===========================================
 # КОНФИГУРАЦИЯ — ЗАМЕНИТЕ НА СВОИ ЗНАЧЕНИЯ!
@@ -17,16 +14,7 @@ ADMIN_CHAT_ID = 1154349995         # ← СЮДА ВСТАВЬТЕ ВАШ ЧИС
 # ИНИЦИАЛИЗАЦИЯ
 # ===========================================
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=BOT_TOKEN)
-storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)
-
-# ===========================================
-# FSM СОСТОЯНИЯ
-# ===========================================
-class BookingStates(StatesGroup):
-    choosing_date = State()
-    confirming_booking = State()
+bot = TeleBot(BOT_TOKEN)
 
 # ===========================================
 # БАЗА ДАННЫХ
@@ -126,141 +114,188 @@ def generate_calendar(year, month, booked_dates):
         types.InlineKeyboardButton(text="▶️", callback_data=f"cal_nav_{next_y}_{next_m}"),
     ])
     keyboard.append([types.InlineKeyboardButton(text="↩️ Меню", callback_data="menu")])
-    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    return types.InlineKeyboardMarkup(keyboard)
 
 # ===========================================
 # ОБРАБОТЧИКИ
 # ===========================================
-@dp.message_handler(commands=['start'])
-async def start(message: types.Message, state: FSMContext):
-    await state.finish()
-    await message.answer(
-        "👋 Привет! Запишитесь на тренировку:",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="📅 Записаться", callback_data="book")],
-            [types.InlineKeyboardButton(text="❌ Отменить запись", callback_data="cancel")],
-        ])
+@bot.message_handler(commands=['start'])
+def start(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(text="📅 Записаться", callback_data="book"))
+    markup.add(types.InlineKeyboardButton(text="❌ Отменить запись", callback_data="cancel"))
+    bot.send_message(
+        message.chat.id,
+        "👋 Привет! Я бот для записи на тренировки.\n\n"
+        "💪 Выберите действие:",
+        reply_markup=markup
     )
 
-@dp.callback_query_handler(lambda c: c.data == "menu")
-async def menu(callback: types.CallbackQuery, state: FSMContext):
-    await state.finish()
-    await callback.message.edit_text(
+@bot.callback_query_handler(func=lambda call: call.data == "menu")
+def menu(call):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(text="📅 Записаться", callback_data="book"))
+    markup.add(types.InlineKeyboardButton(text="❌ Отменить запись", callback_data="cancel"))
+    bot.edit_message_text(
         "Главное меню:",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="📅 Записаться", callback_data="book")],
-            [types.InlineKeyboardButton(text="❌ Отменить запись", callback_data="cancel")],
-        ])
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
     )
-    await callback.answer()
+    bot.answer_callback_query(call.id)
 
-@dp.callback_query_handler(lambda c: c.data == "book")
-async def book(callback: types.CallbackQuery, state: FSMContext):
+@bot.callback_query_handler(func=lambda call: call.data == "book")
+def book(call):
     now = datetime.now()
-    await BookingStates.choosing_date.set()
-    await callback.message.edit_text(
-        "📅 Выберите дату:",
-        reply_markup=generate_calendar(now.year, now.month, get_booked_dates(now.month, now.year))
+    markup = generate_calendar(now.year, now.month, get_booked_dates(now.month, now.year))
+    bot.edit_message_text(
+        "📅 Выберите дату тренировки:\n"
+        "✅ — свободно | ❌ — занято | — — прошло",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
     )
-    await callback.answer()
+    bot.answer_callback_query(call.id)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("cal_nav_"), state=BookingStates.choosing_date)
-async def nav(callback: types.CallbackQuery, state: FSMContext):
-    _, _, y, m = callback.data.split("_")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cal_nav_"))
+def nav(call):
+    _, _, y, m = call.data.split("_")
     y, m = int(y), int(m)
-    await callback.message.edit_text(
-        "📅 Выберите дату:",
-        reply_markup=generate_calendar(y, m, get_booked_dates(m, y))
+    markup = generate_calendar(y, m, get_booked_dates(m, y))
+    bot.edit_message_text(
+        "📅 Выберите дату тренировки:\n"
+        "✅ — свободно | ❌ — занято | — — прошло",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
     )
-    await callback.answer()
+    bot.answer_callback_query(call.id)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("cal_day_"), state=BookingStates.choosing_date)
-async def pick_date(callback: types.CallbackQuery, state: FSMContext):
-    date_str = callback.data.split("_")[2]
-    if datetime.strptime(date_str, "%Y-%m-%d").date() < datetime.now().date():
-        await callback.answer("❌ Дата в прошлом!", show_alert=True)
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cal_day_"))
+def pick_date(call):
+    date_str = call.data.split("_")[2]
+    try:
+        selected = datetime.strptime(date_str, "%Y-%m-%d").date()
+        if selected < datetime.now().date():
+            bot.answer_callback_query(call.id, "❌ Нельзя выбрать прошедшую дату!", show_alert=True)
+            return
+    except:
+        bot.answer_callback_query(call.id, "❌ Ошибка даты", show_alert=True)
         return
-    await state.update_data(date=date_str)
-    await BookingStates.confirming_booking.set()
-    fmt = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
-    await callback.message.edit_text(
-        f"✅ Записаться на {fmt}?",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="✅ Да", callback_data=f"confirm_{date_str}")],
-            [types.InlineKeyboardButton(text="↩️ Назад", callback_data="book")]
-        ])
+    
+    fmt = selected.strftime("%d.%m.%Y (%A)").capitalize()
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(text="✅ Подтвердить запись", callback_data=f"confirm_{date_str}"))
+    markup.add(types.InlineKeyboardButton(text="↩️ Выбрать другую дату", callback_data="book"))
+    bot.edit_message_text(
+        f"Вы выбрали: {fmt}\n\nПодтвердить запись?",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
     )
-    await callback.answer()
+    bot.answer_callback_query(call.id)
 
-@dp.callback_query_handler(lambda c: c.data.startswith("confirm_"), state=BookingStates.confirming_booking)
-async def confirm(callback: types.CallbackQuery, state: FSMContext):
-    date_str = callback.data.split("_")[1]
-    user_id = callback.from_user.id
-    username = callback.from_user.username or f"id{user_id}"
+@bot.callback_query_handler(func=lambda call: call.data.startswith("confirm_"))
+def confirm(call):
+    date_str = call.data.split("_")[1]
+    user_id = call.from_user.id
+    username = call.from_user.username or f"id{user_id}"
+    
+    # Отменяем старую запись, если есть
+    existing = get_user_booking(user_id)
+    if existing and existing != date_str:
+        cancel_booking(user_id)
     
     if not book_training(user_id, username, date_str):
-        await callback.message.edit_text(
-            "❌ Дата занята. Выберите другую:",
-            reply_markup=generate_calendar(
-                datetime.now().year,
-                datetime.now().month,
-                get_booked_dates(datetime.now().month, datetime.now().year)
-            )
+        now = datetime.now()
+        markup = generate_calendar(now.year, now.month, get_booked_dates(now.month, now.year))
+        bot.edit_message_text(
+            "❌ Эта дата уже занята. Выберите другую:",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup
         )
         return
     
+    # Форматируем дату для сообщения
     fmt = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
-    try:
-        await bot.send_message(ADMIN_CHAT_ID, f"🔔 Новая запись!\n@{username} на {fmt}")
-    except Exception as e:
-        logging.error(f"Ошибка отправки админу: {e}")
     
-    await callback.message.edit_text(
-        f"🎉 Записаны на {fmt} в 19:00!\n📍 ул. Спортивная, 15",
-        reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-            [types.InlineKeyboardButton(text="❌ Отменить", callback_data="cancel")],
-            [types.InlineKeyboardButton(text="↩️ Меню", callback_data="menu")]
-        ])
+    # Уведомляем админа
+    try:
+        bot.send_message(
+            ADMIN_CHAT_ID,
+            f"🔔 НОВАЯ ЗАПИСЬ НА ТРЕНИРОВКУ!\n\n"
+            f"👤 Пользователь: @{username} (ID: {user_id})\n"
+            f"📅 Дата: {fmt}\n"
+            f"⏰ Время: 19:00\n"
+            f"📍 Место: ул. Спортивная, 15"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить админу: {e}")
+    
+    # Отвечаем пользователю
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton(text="❌ Отменить запись", callback_data="cancel"))
+    markup.add(types.InlineKeyboardButton(text="↩️ В меню", callback_data="menu"))
+    bot.edit_message_text(
+        f"✅ Успешно записаны на тренировку!\n\n"
+        f"📅 Дата: {fmt}\n"
+        f"⏰ Время: 19:00\n"
+        f"📍 Адрес: ул. Спортивная, 15\n\n"
+        f"❗ За 3 часа до тренировки можно отменить запись через меню бота.",
+        call.message.chat.id,
+        call.message.message_id,
+        reply_markup=markup
     )
-    await state.finish()
-    await callback.answer()
+    bot.answer_callback_query(call.id)
 
-@dp.callback_query_handler(lambda c: c.data == "cancel")
-async def cancel(callback: types.CallbackQuery):
-    date = cancel_booking(callback.from_user.id)
+@bot.callback_query_handler(func=lambda call: call.data == "cancel")
+def cancel(call):
+    date = cancel_booking(call.from_user.id)
     if date:
         fmt = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
         try:
-            await bot.send_message(ADMIN_CHAT_ID, f"🔕 Отмена записи @{callback.from_user.username} на {fmt}")
+            username = call.from_user.username or f"id{call.from_user.id}"
+            bot.send_message(
+                ADMIN_CHAT_ID,
+                f"🔕 ОТМЕНА ЗАПИСИ\n\n"
+                f"👤 Пользователь: @{username}\n"
+                f"📅 Дата: {fmt}"
+            )
         except:
             pass
-        await callback.message.edit_text(
-            f"❌ Запись на {fmt} отменена.",
-            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="📅 Записаться", callback_data="book")],
-                [types.InlineKeyboardButton(text="↩️ Меню", callback_data="menu")]
-            ])
+        
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(text="📅 Записаться снова", callback_data="book"))
+        markup.add(types.InlineKeyboardButton(text="↩️ В меню", callback_data="menu"))
+        bot.edit_message_text(
+            f"❌ Ваша запись на {fmt} отменена.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup
         )
     else:
-        await callback.message.edit_text(
-            "ℹ️ Нет активных записей.",
-            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=[
-                [types.InlineKeyboardButton(text="📅 Записаться", callback_data="book")],
-                [types.InlineKeyboardButton(text="↩️ Меню", callback_data="menu")]
-            ])
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton(text="📅 Записаться", callback_data="book"))
+        markup.add(types.InlineKeyboardButton(text="↩️ В меню", callback_data="menu"))
+        bot.edit_message_text(
+            "ℹ️ У вас нет активных записей на тренировки.",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=markup
         )
-    await callback.answer()
+    bot.answer_callback_query(call.id)
 
-@dp.callback_query_handler(lambda c: c.data == "ignore")
-async def ignore(callback: types.CallbackQuery):
-    await callback.answer()
+@bot.callback_query_handler(func=lambda call: call.data == "ignore")
+def ignore(call):
+    bot.answer_callback_query(call.id)
 
 # ===========================================
 # ЗАПУСК
 # ===========================================
 if __name__ == '__main__':
     init_db()
-    print("✅ Бот запущен! (aiogram 2.x)")
+    print("✅ Бот запущен! (pyTelegramBotAPI)")
     print(f"ℹ️  Токен: {'*' * (len(BOT_TOKEN)-4) + BOT_TOKEN[-4:] if BOT_TOKEN != 'YOUR_BOT_TOKEN' else 'НЕ УСТАНОВЛЕН'}")
     print(f"ℹ️  Админ: {ADMIN_CHAT_ID}")
-    executor.start_polling(dp, skip_updates=True)
+    bot.infinity_polling()
